@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Notes</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="theme-color" content="#2f5bea" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Notes" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+  <style>
+    :root { --bg:#f5f6f8; --surface:#fff; --border:#e3e6eb; --text:#1b1f27; --muted:#6b7280; --primary:#2f5bea; --danger:#e5484d; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#111318; --surface:#1a1d24; --border:#2b303a; --text:#e8eaf0; --muted:#9aa1ad; --primary:#6f8fff; } }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:'Pretendard Variable',Pretendard,-apple-system,'Malgun Gothic',sans-serif; }
+    #lock { max-width:340px; margin:16vh auto 0; padding:0 16px; }
+    #lock form { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:26px 22px; }
+    #lock h1 { font-size:19px; margin:0 0 18px; }
+    #lock input[type=password] { width:100%; box-sizing:border-box; font:inherit; font-size:16px; padding:11px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--text); }
+    #lock label { display:flex; gap:6px; align-items:center; font-size:13px; color:var(--muted); margin:12px 0 14px; }
+    #lock button { width:100%; font:inherit; font-weight:600; font-size:15px; padding:11px; border:0; border-radius:10px; background:var(--primary); color:#fff; cursor:pointer; }
+    #lock button:disabled { opacity:.6; }
+    #lockErr { color:var(--danger); font-size:13px; min-height:18px; margin-top:10px; }
+    #boot { text-align:center; color:var(--muted); margin-top:30vh; }
+  </style>
+</head>
+<body>
+  <div id="boot">…</div>
+  <main id="lock" hidden>
+    <form id="lockForm">
+      <h1>🔒 Notes</h1>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="비밀번호" required />
+      <label><input id="remember" type="checkbox" checked /> 이 기기에서 기억하기</label>
+      <button id="lockBtn" type="submit">열기</button>
+      <div id="lockErr" role="alert"></div>
+    </form>
+  </main>
+  <script>
+  (() => {
+    const KEY_STORE = 'notes.k';
+    const subtle = crypto.subtle;
+    const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    const toB64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const store = {
+      get() { try { return localStorage.getItem(KEY_STORE); } catch { return null; } },
+      set(v) { try { localStorage.setItem(KEY_STORE, v); } catch {} },
+      del() { try { localStorage.removeItem(KEY_STORE); } catch {} },
+    };
+
+    async function fetchBuf(name) {
+      const res = await fetch(`${name}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${name} ${res.status}`);
+      return res.arrayBuffer();
+    }
+    async function unpack(key, name) {
+      const buf = await fetchBuf(name);
+      const plain = await subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(buf, 0, 12) }, key, new Uint8Array(buf, 12));
+      const stream = new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return JSON.parse(await new Response(stream).text());
+    }
+    async function keyFromPassword(pw) {
+      const meta = await (await fetch(`meta.json?t=${Date.now()}`, { cache: 'no-store' })).json();
+      const base = await subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+      return subtle.deriveKey({ name: 'PBKDF2', salt: b64(meta.salt), iterations: meta.iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, true, ['decrypt']);
+    }
+    const keyFromStored = (s) => subtle.importKey('raw', b64(s), { name: 'AES-GCM' }, true, ['decrypt']);
+
+    function run(code, type) {
+      const s = document.createElement('script');
+      if (type) s.type = type;
+      s.textContent = code;
+      document.body.appendChild(s);
+    }
+
+    function boot(key, bundle) {
+      const { app, data } = bundle;
+      let detailsPromise = null;
+      window.__STATIC__ = {
+        data,
+        async reload() { return (await unpack(key, 'bundle.enc')).data; },
+        details() { return (detailsPromise ||= unpack(key, 'details.enc').catch((e) => { detailsPromise = null; throw e; })); },
+        lock() { store.del(); location.reload(); },
+      };
+      document.title = app.title || 'Notes';
+      const style = document.createElement('style');
+      style.textContent = app.css;
+      document.head.appendChild(style);
+      document.body.innerHTML = app.html;
+      run(app.adapter);
+      run(app.js, 'module');
+    }
+
+    function showLock(msg) {
+      document.getElementById('boot').hidden = true;
+      document.getElementById('lock').hidden = false;
+      document.getElementById('lockErr').textContent = msg || '';
+      document.getElementById('pw').focus();
+    }
+
+    document.getElementById('lockForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('lockBtn');
+      btn.disabled = true;
+      btn.textContent = '여는 중…';
+      try {
+        const key = await keyFromPassword(document.getElementById('pw').value);
+        const bundle = await unpack(key, 'bundle.enc');
+        if (document.getElementById('remember').checked) store.set(toB64(await subtle.exportKey('raw', key)));
+        boot(key, bundle);
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '열기';
+        showLock(err && err.name === 'OperationError' ? '비밀번호가 맞지 않아요' : '불러오지 못했어요. 잠시 뒤 다시 시도해 주세요.');
+      }
+    });
+
+    (async () => {
+      if (!window.crypto?.subtle || !window.DecompressionStream) return showLock('이 브라우저는 지원하지 않아요. 최신 Chrome·Safari로 열어 주세요.');
+      const saved = store.get();
+      if (!saved) return showLock();
+      try {
+        const key = await keyFromStored(saved);
+        boot(key, await unpack(key, 'bundle.enc'));
+      } catch (err) {
+        if (err && err.name === 'OperationError') store.del(); // 비밀번호가 바뀐 경우
+        showLock(err && err.name === 'OperationError' ? '비밀번호를 다시 입력해 주세요' : '');
+      }
+    })();
+  })();
+  </script>
+</body>
+</html>
